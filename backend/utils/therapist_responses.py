@@ -19,6 +19,13 @@ def build_response(
     message_count: int,
     history_snippet: list[dict],
 ) -> str:
+    # extract last user message for context
+    last_user_msg = ""
+    for m in reversed(history_snippet):
+        if m.get("role") == "user":
+            last_user_msg = m.get("content", "")
+            break
+
     try:
         from models.response_generator import generate
         reply = generate(
@@ -35,7 +42,7 @@ def build_response(
     except Exception:
         pass
 
-    return _build_template_response(intent, state, user_name, message_count)
+    return _build_template_response(intent, state, user_name, message_count, last_user_msg)
 
 
 # ── Crisis resources ──────────────────────────────────────────────────────────
@@ -284,27 +291,52 @@ _FOLLOWUPS: dict[str, list[str]] = {
 }
 
 
+def _extract_key_phrase(text: str, intent: str) -> str:
+    """Pull a short phrase from the user message to anchor the response."""
+    import re
+    t = text.strip()
+    # For work_stress pull the job/study detail
+    if intent == "work_stress":
+        m = re.search(r"(my boss|my manager|my job|my work|my exams?|my dissertation|my deadline|my workload)", t, re.I)
+        if m:
+            return m.group(1).lower()
+    # For relationship pull the person mentioned
+    if intent == "relationship":
+        m = re.search(r"my (partner|boyfriend|girlfriend|husband|wife|mum|mom|dad|father|mother|brother|sister|friend|family)", t, re.I)
+        if m:
+            return m.group(0).lower()
+    # For venting, pull the core frustration subject
+    if intent == "venting":
+        m = re.search(r"(my (flatmate|roommate|boss|colleague|friend|family|partner)|the (bus|train|commute|meeting|day))", t, re.I)
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
 def _build_template_response(
     intent: str,
     state: DialogueState,
     user_name: str,
     message_count: int,
+    last_user_msg: str = "",
 ) -> str:
     opening  = random.choice(_OPENINGS.get(intent, _OPENINGS["general"]))
     followup = random.choice(_FOLLOWUPS.get(intent, _FOLLOWUPS["general"]))
 
-    # personalise with name for early messages
     name_prefix = f"{user_name}, " if user_name and message_count <= 6 else ""
 
-    # inject DST context where useful
+    # Build context line from DST state + message content
     context_line = ""
-    if intent in ("anxiety", "depression", "work_stress", "trauma", "self_esteem"):
-        if state.mentioned_people:
-            person = state.mentioned_people[-1]
-            context_line = f"\n\nIt sounds like {person} is part of this."
-        elif state.active_topics and intent == "work_stress":
-            topic = state.active_topics[-1]
-            context_line = f"\n\nThe {topic} side of things seems to be at the centre of it."
+    key_phrase = _extract_key_phrase(last_user_msg, intent) if last_user_msg else ""
+
+    if key_phrase:
+        context_line = f"\n\nWhat you said about {key_phrase} — that stood out to me."
+    elif state.mentioned_people:
+        person = state.mentioned_people[-1]
+        context_line = f"\n\nIt sounds like {person} is connected to this."
+    elif state.active_topics and intent in ("work_stress", "anxiety", "depression"):
+        topic = state.active_topics[-1]
+        context_line = f"\n\nThe {topic} piece seems to be central to what you're carrying."
 
     reply = f"{name_prefix}{opening}{context_line}\n\n{followup}"
 
