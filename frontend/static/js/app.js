@@ -112,6 +112,7 @@ function handleMessage(data) {
   switch (data.type) {
     case "history":
       removeTypingIndicator();
+      messagesEl.innerHTML = "";
       data.messages.forEach(m => appendBubble(m.role, m.content, m.timestamp, false));
       scrollBottom();
       break;

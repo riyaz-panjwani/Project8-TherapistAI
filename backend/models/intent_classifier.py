@@ -69,7 +69,19 @@ class IntentClassifier:
             return self._classify_custom(text)
         return self._classify_heuristic(text)
 
+    _CRISIS_RE = re.compile(
+        r"\b(suicid|kill myself|end my life|don.t want to live|self.?harm|"
+        r"cut myself|hurt myself|want to die|end it all|no reason to live)\b",
+        re.IGNORECASE,
+    )
+
     def _classify_custom(self, text: str) -> IntentResult:
+        # Safety override: crisis keywords always win regardless of model output
+        if self._CRISIS_RE.search(text):
+            scores = {l: 0.01 for l in INTENT_LABELS}
+            scores["crisis"] = 0.99
+            return IntentResult(label="crisis", score=0.99, all_scores=scores)
+
         ids  = self._tokenizer.encode(text)
         mask = self._tokenizer.attention_mask(ids)
         t_ids  = torch.tensor([ids],  dtype=torch.long)

@@ -24,6 +24,7 @@ from utils.therapist_responses import (
 # ── per-connection in-memory state (lost on restart, not persisted) ──────────
 # Persistent state lives in SQLite via the DB helpers above.
 _active_states: dict[str, DialogueState] = {}
+_greeted_this_session: set[str] = set()  # prevents repeat greeting on reconnect
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -90,16 +91,15 @@ async def websocket_endpoint(
         greeting = first_greeting(profile.display_name)
         await websocket.send_json({"type": "message", "role": "therapist", "content": greeting})
         await save_message(db, user_id, "therapist", greeting)
-    elif count == 0:
-        # has therapist messages but no user messages — reconnect, skip greeting
-        pass
-    else:
+        _greeted_this_session.add(user_id)
+    elif count > 0 and user_id not in _greeted_this_session:
+        # returning user — greet once per server session, don't persist to DB
         import json as _json
         themes = _json.loads(profile.recurring_themes)
         last_theme = themes[-1] if themes else ""
         greeting = returning_greeting(profile.display_name, count, last_theme)
         await websocket.send_json({"type": "message", "role": "therapist", "content": greeting})
-        await save_message(db, user_id, "therapist", greeting)
+        _greeted_this_session.add(user_id)
 
     try:
         while True:
