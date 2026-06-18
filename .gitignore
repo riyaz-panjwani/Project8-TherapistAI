@@ -10,8 +10,12 @@ env/
 # Database (local only — each user gets their own)
 backend/memory/therapist.db
 
-# Model checkpoints (large — download/train locally)
+# Model checkpoints (large — train locally)
 training/checkpoints/
+
+# GloVe vectors (large — run download_glove.py)
+training/data/glove*
+training/data/*.zip
 
 # Env / secrets
 .env
