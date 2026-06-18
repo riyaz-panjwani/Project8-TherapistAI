@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Database (local only — each user gets their own)
+backend/memory/therapist.db
+
+# Model checkpoints (large — download/train locally)
+training/checkpoints/
+
+# Env / secrets
+.env
+*.env
+
+# macOS
+.DS_Store
+
+# Logs
+*.log

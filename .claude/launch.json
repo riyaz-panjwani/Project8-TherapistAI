@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "therapist-ui",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "uvicorn", "main:app", "--port", "8001"],
+      "port": 8001,
+      "cwd": "/Users/sailor/Documents/Work/Project8-TherapistAI/backend"
+    }
+  ]
+}
