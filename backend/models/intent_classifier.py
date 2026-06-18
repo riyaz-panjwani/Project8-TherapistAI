@@ -66,7 +66,13 @@ class IntentClassifier:
 
     def classify(self, text: str) -> IntentResult:
         if self._model is not None:
-            return self._classify_custom(text)
+            result = self._classify_custom(text)
+            # When model confidence is low, blend with heuristic
+            if result.score < 0.55:
+                heuristic = self._classify_heuristic(text)
+                if heuristic.score > 0.55 and heuristic.label != result.label:
+                    return heuristic
+            return result
         return self._classify_heuristic(text)
 
     _CRISIS_RE = re.compile(
@@ -74,6 +80,35 @@ class IntentClassifier:
         r"cut myself|hurt myself|want to die|end it all|no reason to live)\b",
         re.IGNORECASE,
     )
+
+    # Strong domain-specific overrides: two or more hits → use heuristic label
+    _STRONG_PATTERNS: dict[str, re.Pattern] = {
+        "work_stress": re.compile(
+            r"\b(boss|manager|deadline|workload|burnout|fired|redundant|"
+            r"my job|at work|office|exam|dissertation|uni|university|coursework)\b",
+            re.IGNORECASE,
+        ),
+        "relationship": re.compile(
+            r"\b(my (partner|boyfriend|girlfriend|husband|wife|mum|mom|dad|"
+            r"brother|sister|friend|family))\b",
+            re.IGNORECASE,
+        ),
+        "anxiety": re.compile(
+            r"\b(anxious|anxiety|panic|panic attack|worried|worrying|dread|"
+            r"overwhelm|racing thoughts|can.t breathe)\b",
+            re.IGNORECASE,
+        ),
+        "depression": re.compile(
+            r"\b(depressed|depression|hopeless|numb|empty|worthless|can.t get up|"
+            r"no point|nothing matters)\b",
+            re.IGNORECASE,
+        ),
+        "gratitude": re.compile(
+            r"\b(thank you|thanks|grateful|appreciate|helped me|feel better|"
+            r"so helpful|really helped)\b",
+            re.IGNORECASE,
+        ),
+    }
 
     def _classify_custom(self, text: str) -> IntentResult:
         # Safety override: crisis keywords always win regardless of model output
@@ -87,6 +122,19 @@ class IntentClassifier:
         t_ids  = torch.tensor([ids],  dtype=torch.long)
         t_mask = torch.tensor([mask], dtype=torch.long)
         label, score = self._model.predict_intent(t_ids, t_mask)
+
+        # Strong pattern override: if 2+ strong hits for a class the model missed, trust them
+        for override_label, pattern in self._STRONG_PATTERNS.items():
+            hits = len(pattern.findall(text))
+            if hits >= 2 and label != override_label:
+                scores_out = {l: 0.05 for l in INTENT_LABELS}
+                scores_out[override_label] = 0.85
+                return IntentResult(label=override_label, score=0.85, all_scores=scores_out)
+            if hits == 1 and score < 0.50 and label != override_label:
+                scores_out = {l: 0.05 for l in INTENT_LABELS}
+                scores_out[override_label] = 0.75
+                return IntentResult(label=override_label, score=0.75, all_scores=scores_out)
+
         all_scores = {l: (score if l == label else 0.0) for l in INTENT_LABELS}
         return IntentResult(label=label, score=score, all_scores=all_scores)
 

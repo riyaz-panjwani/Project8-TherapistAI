@@ -326,17 +326,21 @@ def _build_template_response(
     name_prefix = f"{user_name}, " if user_name and message_count <= 6 else ""
 
     # Build context line from DST state + message content
+    # Only inject context for intents where it's therapeutically relevant
+    _context_intents = {"anxiety", "depression", "work_stress", "trauma", "self_esteem",
+                        "relationship", "venting"}
     context_line = ""
     key_phrase = _extract_key_phrase(last_user_msg, intent) if last_user_msg else ""
 
-    if key_phrase:
-        context_line = f"\n\nWhat you said about {key_phrase} — that stood out to me."
-    elif state.mentioned_people:
-        person = state.mentioned_people[-1]
-        context_line = f"\n\nIt sounds like {person} is connected to this."
-    elif state.active_topics and intent in ("work_stress", "anxiety", "depression"):
-        topic = state.active_topics[-1]
-        context_line = f"\n\nThe {topic} piece seems to be central to what you're carrying."
+    if intent in _context_intents:
+        if key_phrase:
+            context_line = f"\n\nWhat you said about {key_phrase} — that stood out to me."
+        elif state.mentioned_people and intent in ("relationship", "venting", "work_stress", "anxiety"):
+            person = state.mentioned_people[-1]
+            context_line = f"\n\nIt sounds like {person} is at the centre of this."
+        elif state.active_topics and intent in ("work_stress", "anxiety", "depression"):
+            topic = state.active_topics[-1]
+            context_line = f"\n\nThe {topic} side of things seems to be where this is centred."
 
     reply = f"{name_prefix}{opening}{context_line}\n\n{followup}"
 
