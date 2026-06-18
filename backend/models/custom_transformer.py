@@ -82,8 +82,8 @@ D_EMBED  = 100    # GloVe vector size
 D_MODEL  = 128    # internal Transformer dimension
 N_HEADS  = 4      # attention heads  (D_MODEL / N_HEADS = 32)
 D_FF     = 256    # feed-forward hidden size
-N_LAYERS = 4      # Transformer encoder depth
-DROPOUT  = 0.1
+N_LAYERS = 3      # Transformer encoder depth (3 layers reduces overfitting on small dataset)
+DROPOUT  = 0.3    # higher dropout for small dataset
 MAX_LEN  = 128    # max token sequence length
 
 # ════════════════════════════════════════════════════════════════════════════

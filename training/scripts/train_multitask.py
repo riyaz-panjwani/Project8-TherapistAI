@@ -115,10 +115,10 @@ def main():
     parser.add_argument("--val_file",    default="training/data/multitask_val.jsonl")
     parser.add_argument("--glove",       default=str(GLOVE_PATH))
     parser.add_argument("--output_dir",  default=str(CHECKPOINT_DIR))
-    parser.add_argument("--epochs",      type=int,   default=30)
+    parser.add_argument("--epochs",      type=int,   default=60)
     parser.add_argument("--batch_size",  type=int,   default=16)
-    parser.add_argument("--lr",          type=float, default=3e-4)
-    parser.add_argument("--patience",    type=int,   default=5)
+    parser.add_argument("--lr",          type=float, default=2e-4)
+    parser.add_argument("--patience",    type=int,   default=8)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -202,7 +202,7 @@ def main():
             config = {
                 "vocab_size": tokenizer.vocab_size,
                 "d_embed": 100, "d_model": 128, "n_heads": 4,
-                "d_ff": 256, "n_layers": 4, "dropout": 0.1, "max_len": MAX_LEN,
+                "d_ff": 256, "n_layers": 3, "dropout": 0.3, "max_len": MAX_LEN,
             }
             (out_dir / "config.json").write_text(json.dumps(config, indent=2))
             print(f"       ✓ saved (val_loss={val_loss:.4f})")
