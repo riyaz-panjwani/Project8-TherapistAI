@@ -80,6 +80,12 @@ function connect() {
   clearTimeout(reconnectTimer);
   setStatus("connecting");
 
+  // Close any existing connection before opening a new one
+  if (ws && ws.readyState !== WebSocket.CLOSED) {
+    ws.onclose = null; // prevent reconnect loop from old socket
+    ws.close();
+  }
+
   ws = new WebSocket(`ws://${WS_HOST}/ws/${userId}`);
 
   ws.addEventListener("open", () => {
