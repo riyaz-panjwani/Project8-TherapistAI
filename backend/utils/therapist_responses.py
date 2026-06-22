@@ -42,7 +42,7 @@ def build_response(
     except Exception:
         pass
 
-    return _build_template_response(intent, state, user_name, message_count, last_user_msg)
+    return _build_template_response(intent, state, user_name, message_count, last_user_msg, profile_summary)
 
 
 # ── Crisis resources ──────────────────────────────────────────────────────────
@@ -319,6 +319,7 @@ def _build_template_response(
     user_name: str,
     message_count: int,
     last_user_msg: str = "",
+    profile_summary: str = "",
 ) -> str:
     opening  = random.choice(_OPENINGS.get(intent, _OPENINGS["general"]))
     followup = random.choice(_FOLLOWUPS.get(intent, _FOLLOWUPS["general"]))
@@ -342,7 +343,27 @@ def _build_template_response(
             topic = state.active_topics[-1]
             context_line = f"\n\nThe {topic} side of things seems to be where this is centred."
 
-    reply = f"{name_prefix}{opening}{context_line}\n\n{followup}"
+    # For returning users with a profile summary, surface remembered context
+    # on emotionally significant intents (not gratitude/checking_in/general)
+    memory_line = ""
+    _memory_intents = {"anxiety", "depression", "work_stress", "trauma",
+                       "self_esteem", "relationship", "venting", "seeking_advice"}
+    if (profile_summary and message_count > 10
+            and intent in _memory_intents
+            and not context_line):
+        # pick the most relevant fragment from summary
+        for fragment in profile_summary.split(";"):
+            frag = fragment.strip()
+            if intent == "work_stress" and "work" in frag.lower():
+                memory_line = f"\n\nI remember we've talked about {frag} before."
+                break
+            elif intent == "relationship" and ("people" in frag.lower() or "person" in frag.lower()):
+                memory_line = f"\n\nI still carry what you've shared with me — {frag}."
+                break
+        if not memory_line and "themes" in profile_summary:
+            pass  # only inject if specifically relevant, avoid generic spam
+
+    reply = f"{name_prefix}{opening}{context_line or memory_line}\n\n{followup}"
 
     if intent == "crisis":
         reply += _CRISIS_RESOURCES

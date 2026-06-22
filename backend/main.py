@@ -21,6 +21,26 @@ from utils.therapist_responses import (
     build_response, first_greeting, returning_greeting,
 )
 
+
+def _build_summary(profile: "UserProfile", state: "DialogueState") -> str:
+    """Build a short narrative summary from profile + current DST state."""
+    import json as _json
+    parts: list[str] = []
+    themes = _json.loads(profile.recurring_themes)
+    if themes:
+        parts.append(f"recurring themes: {', '.join(themes[-5:])}")
+    topics = _json.loads(profile.disclosed_topics)
+    if topics:
+        parts.append(f"discussed topics: {', '.join(topics[-5:])}")
+    if state.mentioned_people:
+        parts.append(f"mentioned people: {', '.join(state.mentioned_people[-4:])}")
+    mood_hist = _json.loads(profile.mood_history)
+    if mood_hist:
+        recent_score = mood_hist[-1]["score"]
+        mood_word = "low" if recent_score < -0.3 else ("positive" if recent_score > 0.3 else "neutral")
+        parts.append(f"recent mood: {mood_word}")
+    return "; ".join(parts) if parts else ""
+
 # ── per-connection in-memory state (lost on restart, not persisted) ──────────
 # Persistent state lives in SQLite via the DB helpers above.
 _active_states: dict[str, DialogueState] = {}
@@ -147,6 +167,12 @@ async def websocket_endpoint(
             if state.active_topics:
                 await update_profile(db, user_id, new_theme=state.active_topics[-1])
             await update_profile(db, user_id, mood_score=state.mood_score)
+
+            # rebuild narrative summary every 5 user messages
+            if count % 5 == 0:
+                summary_text = _build_summary(profile, state)
+                if summary_text:
+                    await update_profile(db, user_id, summary=summary_text)
 
             profile = await get_or_create_profile(db, user_id)
             count   = await count_messages(db, user_id)
