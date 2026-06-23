@@ -16,25 +16,25 @@ Input tokens
 Embedding  (GloVe 100d, fine-tuned)
     │
     ▼
-Linear projection  100 → d_model=128
+Linear projection  100 → d_model=256
     │
     ▼
 Sinusoidal Positional Encoding
     │
     ▼
-TransformerEncoder  (n_layers=4)
-  ├─ MultiHeadSelfAttention  (n_heads=4, d_k=32)
+TransformerEncoder  (n_layers=4, Pre-LN)
+  ├─ MultiHeadSelfAttention  (n_heads=8, d_k=32)
   ├─ Add & LayerNorm
-  ├─ FeedForward  (d_ff=256, GELU)
+  ├─ FeedForward  (d_ff=512, GELU)
   └─ Add & LayerNorm
     │
-    ├──────────────────────┐
-    ▼                      ▼
-[CLS] hidden state     token hidden states
-    │                      │
-    ▼                      ▼
-Intent Head            DST Head
-(linear → 13 classes)  (linear → 9 BIO tags)
+    ├──────────────────────────────────────┐
+    ▼                                      ▼
+[CLS] + mean-pool concat [B,2·d_model]  token hidden states
+    │                                      │
+    ▼                                      ▼
+Intent Head                            DST Head
+(MLP: 512→256→13, GELU)               (linear → 9 BIO tags)
 """
 
 from __future__ import annotations
@@ -79,11 +79,11 @@ ID2DST    = {i: l for i, l in enumerate(DST_LABELS)}
 # ── hyper-parameters ───────────────────────────────────────────────────────
 
 D_EMBED  = 100    # GloVe vector size
-D_MODEL  = 128    # internal Transformer dimension
-N_HEADS  = 4      # attention heads  (D_MODEL / N_HEADS = 32)
-D_FF     = 256    # feed-forward hidden size
-N_LAYERS = 3      # Transformer encoder depth (3 layers reduces overfitting on small dataset)
-DROPOUT  = 0.3    # higher dropout for small dataset
+D_MODEL  = 256    # internal Transformer dimension
+N_HEADS  = 8      # attention heads  (D_MODEL / N_HEADS = 32)
+D_FF     = 512    # feed-forward hidden size
+N_LAYERS = 4      # Transformer encoder depth
+DROPOUT  = 0.2    # dropout (lowered — larger dataset + model)
 MAX_LEN  = 128    # max token sequence length
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -327,6 +327,9 @@ if _TORCH_OK:
         Transfer learning: call load_glove_embeddings() to initialise the
         embedding layer from pre-trained GloVe 100d vectors. The embeddings
         are then fine-tuned jointly with the rest of the model.
+
+        Intent representation: [CLS] hidden state concatenated with the
+        mean-pooled non-pad hidden states → richer whole-utterance signal.
         """
 
         def __init__(
@@ -348,14 +351,17 @@ if _TORCH_OK:
 
             # embedding + projection
             self.embedding  = nn.Embedding(vocab_size, d_embed, padding_idx=pad_id)
-            self.proj       = nn.Linear(d_embed, d_model)       # 100 → 128
+            self.proj       = nn.Linear(d_embed, d_model)
             self.pos_enc    = PositionalEncoding(d_model, max_len, dropout)
 
             # shared encoder
             self.encoder = TransformerEncoder(n_layers, d_model, n_heads, d_ff, dropout)
 
-            # task heads
+            # intent head: MLP over [CLS ∥ mean-pool] → richer utterance repr
             self.intent_head = nn.Sequential(
+                nn.Dropout(dropout),
+                nn.Linear(d_model * 2, d_model),
+                nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(d_model, n_intent),
             )
@@ -384,9 +390,13 @@ if _TORCH_OK:
             # shared Transformer encoder
             x = self.encoder(x, attention_mask)         # [B, T, d_model]
 
-            # [CLS] token (position 0) → intent
-            cls_hidden     = x[:, 0, :]                 # [B, d_model]
-            intent_logits  = self.intent_head(cls_hidden)
+            # [CLS] token + mean-pool over non-pad tokens → richer intent repr
+            cls_hidden  = x[:, 0, :]                    # [B, d_model]
+            mask_f      = attention_mask.unsqueeze(-1).float()
+            mean_hidden = (x * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+            intent_logits = self.intent_head(
+                torch.cat([cls_hidden, mean_hidden], dim=-1)   # [B, 2·d_model]
+            )
 
             # all token positions → DST tags
             dst_logits = self.dst_head(x)               # [B, T, n_dst]

@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 # make backend importable
@@ -34,12 +36,84 @@ CHECKPOINT_DIR = Path("training/checkpoints/therapist_transformer")
 GLOVE_PATH     = Path("training/data/glove.6B.100d.txt")
 
 
+# ── label-smoothing cross-entropy ──────────────────────────────────────────
+
+class LabelSmoothingCrossEntropy(nn.Module):
+    """Cross-entropy with label smoothing ε — reduces overconfidence."""
+    def __init__(self, smoothing: float = 0.1, ignore_index: int = -100):
+        super().__init__()
+        self.smoothing     = smoothing
+        self.ignore_index  = ignore_index
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        n_classes = logits.size(-1)
+        log_probs = F.log_softmax(logits, dim=-1)                  # [*, C]
+
+        with torch.no_grad():
+            smooth = torch.full_like(log_probs, self.smoothing / (n_classes - 1))
+            smooth.scatter_(-1, targets.unsqueeze(-1).clamp(min=0), 1.0 - self.smoothing)
+
+        loss = -(smooth * log_probs).sum(dim=-1)
+
+        if self.ignore_index >= 0:
+            mask = targets.ne(self.ignore_index)
+            loss = loss[mask]
+
+        return loss.mean()
+
+
+# ── warmup + cosine LR scheduler ──────────────────────────────────────────
+
+def get_warmup_cosine_scheduler(optimizer, warmup_steps: int, total_steps: int):
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return float(step + 1) / float(max(1, warmup_steps))
+        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    import math
+    from torch.optim.lr_scheduler import LambdaLR
+    return LambdaLR(optimizer, lr_lambda)
+
+
 # ── dataset ────────────────────────────────────────────────────────────────
 
+def _augment_ids(ids: list[int], pad_id: int, cls_id: int, sep_id: int,
+                 p_delete: float = 0.12, p_swap: float = 0.08) -> list[int]:
+    """Random token deletion + adjacent swap (skips special tokens)."""
+    # find real tokens (exclude CLS, SEP, PAD)
+    specials = {pad_id, cls_id, sep_id}
+    idx = [i for i, t in enumerate(ids) if t not in specials]
+    if len(idx) < 2:
+        return ids
+
+    out = list(ids)
+    # deletion
+    to_del = {i for i in idx if random.random() < p_delete}
+    out = [t for i, t in enumerate(out) if i not in to_del]
+
+    # adjacent swap on remaining real tokens
+    idx2 = [i for i, t in enumerate(out) if t not in specials]
+    for i in range(len(idx2) - 1):
+        if random.random() < p_swap:
+            a, b = idx2[i], idx2[i + 1]
+            out[a], out[b] = out[b], out[a]
+
+    # re-pad to original length
+    max_len = len(ids)
+    out = out[:max_len]
+    out += [pad_id] * (max_len - len(out))
+    return out
+
+
 class TherapyDataset(Dataset):
-    def __init__(self, records: list[dict], tokenizer: Tokenizer):
+    def __init__(self, records: list[dict], tokenizer: Tokenizer, augment: bool = False):
         self.records   = records
         self.tokenizer = tokenizer
+        self.augment   = augment
+        self._pad = tokenizer.word2id["[PAD]"]
+        self._cls = tokenizer.word2id["[CLS]"]
+        self._sep = tokenizer.word2id["[SEP]"]
 
     def __len__(self):
         return len(self.records)
@@ -47,6 +121,8 @@ class TherapyDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         rec    = self.records[idx]
         ids    = self.tokenizer.encode(rec["text"])
+        if self.augment:
+            ids = _augment_ids(ids, self._pad, self._cls, self._sep)
         mask   = self.tokenizer.attention_mask(ids)
         intent = INTENT2ID[rec["intent"]]
 
@@ -115,10 +191,13 @@ def main():
     parser.add_argument("--val_file",    default="training/data/multitask_val.jsonl")
     parser.add_argument("--glove",       default=str(GLOVE_PATH))
     parser.add_argument("--output_dir",  default=str(CHECKPOINT_DIR))
-    parser.add_argument("--epochs",      type=int,   default=60)
-    parser.add_argument("--batch_size",  type=int,   default=16)
-    parser.add_argument("--lr",          type=float, default=2e-4)
-    parser.add_argument("--patience",    type=int,   default=8)
+    parser.add_argument("--epochs",      type=int,   default=120)
+    parser.add_argument("--batch_size",  type=int,   default=32)
+    parser.add_argument("--lr",          type=float, default=5e-5)
+    parser.add_argument("--patience",    type=int,   default=15)
+    parser.add_argument("--warmup_frac", type=float, default=0.08,
+                        help="Fraction of total steps used for linear warmup")
+    parser.add_argument("--label_smooth",type=float, default=0.1)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -132,10 +211,10 @@ def main():
     tokenizer.build_vocab([r["text"] for r in train_recs + val_recs])
     print(f"Vocabulary size: {tokenizer.vocab_size}")
 
-    train_ds = TherapyDataset(train_recs, tokenizer)
-    val_ds   = TherapyDataset(val_recs,   tokenizer)
-    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size)
+    train_ds = TherapyDataset(train_recs, tokenizer, augment=True)
+    val_ds   = TherapyDataset(val_recs,   tokenizer, augment=False)
+    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=0)
+    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, num_workers=0)
 
     model = TherapistTransformer(vocab_size=tokenizer.vocab_size).to(device)
 
@@ -146,12 +225,13 @@ def main():
         print(f"GloVe not found at {args.glove}. Run download_glove.py first.")
         print("Training with random embeddings (results will be weaker).")
 
-    intent_criterion = nn.CrossEntropyLoss()
-    dst_criterion    = nn.CrossEntropyLoss(ignore_index=-100)
-    optimizer        = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
-    scheduler        = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs
-    )
+    intent_criterion = LabelSmoothingCrossEntropy(smoothing=args.label_smooth)
+    dst_criterion    = LabelSmoothingCrossEntropy(smoothing=args.label_smooth, ignore_index=-100)
+    optimizer        = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-3)
+
+    total_steps  = len(train_dl) * args.epochs
+    warmup_steps = int(total_steps * args.warmup_frac)
+    scheduler    = get_warmup_cosine_scheduler(optimizer, warmup_steps, total_steps)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -185,9 +265,8 @@ def main():
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()   # per-step for warmup + cosine
             train_loss += loss.item()
-
-        scheduler.step()
         val_loss, val_acc = evaluate(model, val_dl, intent_criterion, dst_criterion, device)
         train_loss /= len(train_dl)
 
@@ -201,8 +280,8 @@ def main():
             # save config for loading later
             config = {
                 "vocab_size": tokenizer.vocab_size,
-                "d_embed": 100, "d_model": 128, "n_heads": 4,
-                "d_ff": 256, "n_layers": 3, "dropout": 0.3, "max_len": MAX_LEN,
+                "d_embed": 100, "d_model": 256, "n_heads": 8,
+                "d_ff": 512, "n_layers": 4, "dropout": 0.2, "max_len": MAX_LEN,
             }
             (out_dir / "config.json").write_text(json.dumps(config, indent=2))
             print(f"       ✓ saved (val_loss={val_loss:.4f})")
