@@ -466,3 +466,91 @@ if _TORCH_OK:
                 preds = logits[0].argmax(dim=-1).tolist()
                 mask  = (input_ids[0] != self.pad_id).tolist()
                 return [(str(i), ID2DST[p]) for i, (p, m) in enumerate(zip(preds, mask)) if m]
+
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 4. V2 — frozen DistilBERT input → custom encoder trained from scratch
+    # ════════════════════════════════════════════════════════════════════════
+
+    class TherapistTransformerV2(nn.Module):
+        """
+        Multi-task transformer that takes frozen DistilBERT hidden states as
+        input instead of GloVe word embeddings.
+
+        Architecture
+        ────────────
+        Text → DistilBERT tokenizer → DistilBERT (frozen, 768d per token)
+            │
+            ▼
+        Linear projection  768 → d_model=256
+            │
+            ▼
+        Sinusoidal Positional Encoding
+            │
+            ▼
+        TransformerEncoder  (n_layers=4, Pre-LN)  ← trained from scratch
+            │
+            ├──────────────────────────────────────────┐
+            ▼                                          ▼
+        [CLS] + mean-pool → MLP (intent)          per-token → DST head
+        """
+
+        def __init__(
+            self,
+            bert_dim:  int   = 768,
+            d_model:   int   = 256,
+            n_heads:   int   = 8,
+            d_ff:      int   = 512,
+            n_layers:  int   = 4,
+            dropout:   float = 0.2,
+            max_len:   int   = 128,
+            n_intent:  int   = len(INTENT_LABELS),
+            n_dst:     int   = len(DST_LABELS),
+        ):
+            super().__init__()
+            self.proj    = nn.Linear(bert_dim, d_model)
+            self.pos_enc = PositionalEncoding(d_model, max_len, dropout)
+            self.encoder = TransformerEncoder(n_layers, d_model, n_heads, d_ff, dropout)
+
+            self.intent_head = nn.Sequential(
+                nn.Dropout(dropout),
+                nn.Linear(d_model * 2, d_model),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, n_intent),
+            )
+            self.dst_head = nn.Sequential(
+                nn.Dropout(dropout),
+                nn.Linear(d_model, n_dst),
+            )
+
+        def forward(
+            self,
+            hidden_states:  torch.Tensor,             # [B, T, bert_dim]
+            attention_mask: Optional[torch.Tensor] = None,  # [B, T]
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            x = self.proj(hidden_states)              # [B, T, d_model]
+            x = self.pos_enc(x)
+            x = self.encoder(x, attention_mask)
+
+            cls_h  = x[:, 0, :]
+            mask_f = (attention_mask.unsqueeze(-1).float()
+                      if attention_mask is not None
+                      else torch.ones(*x.shape[:2], 1, device=x.device))
+            mean_h = (x * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
+
+            intent_logits = self.intent_head(torch.cat([cls_h, mean_h], dim=-1))
+            dst_logits    = self.dst_head(x)
+            return intent_logits, dst_logits
+
+        def predict_intent(
+            self,
+            hidden_states:  torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+        ) -> tuple[str, float]:
+            self.eval()
+            with torch.no_grad():
+                logits, _ = self(hidden_states, attention_mask)
+                probs = torch.softmax(logits, dim=-1)[0]
+                idx   = int(probs.argmax())
+                return ID2INTENT[idx], float(probs[idx])

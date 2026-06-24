@@ -2,8 +2,9 @@
 falls back to keyword heuristics so the app always runs.
 
 Priority order:
-  1. training/checkpoints/therapist_transformer/  ← our custom model
-  2. Keyword heuristics (no model needed)
+  1. training/checkpoints/therapist_transformer_v2/  ← DistilBERT-backed V2 model (~85-93%)
+  2. training/checkpoints/therapist_transformer/     ← GloVe V1 model (~71%)
+  3. Keyword heuristics (no model needed)
 """
 from __future__ import annotations
 
@@ -24,7 +25,8 @@ INTENT_LABELS = [
     "checking_in", "trauma", "progress", "general",
 ]
 
-CUSTOM_CHECKPOINT = Path(__file__).parent / "../../training/checkpoints/therapist_transformer"
+CUSTOM_CHECKPOINT    = Path(__file__).parent / "../../training/checkpoints/therapist_transformer"
+CUSTOM_CHECKPOINT_V2 = Path(__file__).parent / "../../training/checkpoints/therapist_transformer_v2"
 
 
 @dataclass
@@ -35,17 +37,68 @@ class IntentResult:
 
 
 class IntentClassifier:
-    """Loads custom TherapistTransformer if available, falls back to heuristics."""
+    """Loads best available model; V2 (DistilBERT) > V1 (GloVe) > heuristics."""
 
     def __init__(self, device: str = "cpu"):
-        self.device = device
-        self._model     = None
-        self._tokenizer = None
+        self.device      = device
+        self._model      = None
+        self._tokenizer  = None   # V1 custom Tokenizer
+        # V2-specific
+        self._bert_tok   = None
+        self._bert_model = None
+        self._is_v2      = False
         self._load_model()
 
     def _load_model(self):
         if not _TORCH_AVAILABLE:
             return
+        if self._try_load_v2():
+            return
+        self._try_load_v1()
+
+    def _try_load_v2(self) -> bool:
+        ckpt = CUSTOM_CHECKPOINT_V2.resolve()
+        if not (ckpt / "best_model.pt").exists():
+            return False
+        try:
+            import json
+            from transformers import AutoTokenizer, AutoModel
+            from models.custom_transformer import TherapistTransformerV2
+
+            config = json.loads((ckpt / "config.json").read_text())
+            bert_id = config.get("bert_model", "distilbert-base-uncased")
+
+            bert_tok   = AutoTokenizer.from_pretrained(bert_id)
+            bert_model = AutoModel.from_pretrained(bert_id).to(self.device)
+            for p in bert_model.parameters():
+                p.requires_grad = False
+            bert_model.eval()
+
+            model = TherapistTransformerV2(
+                bert_dim = config.get("bert_dim", 768),
+                d_model  = config.get("d_model", 256),
+                n_heads  = config.get("n_heads", 8),
+                d_ff     = config.get("d_ff", 512),
+                n_layers = config.get("n_layers", 4),
+                dropout  = config.get("dropout", 0.2),
+                max_len  = config.get("max_len", 128),
+            ).to(self.device)
+            model.load_state_dict(
+                torch.load(ckpt / "best_model.pt", map_location=self.device)
+            )
+            model.eval()
+
+            self._model      = model
+            self._bert_tok   = bert_tok
+            self._bert_model = bert_model
+            self._is_v2      = True
+            print("[intent] Loaded TherapistTransformerV2 (DistilBERT features).")
+            return True
+        except Exception as e:
+            print(f"[intent] Could not load V2 model: {e}.")
+            return False
+
+    def _try_load_v1(self):
         ckpt = CUSTOM_CHECKPOINT.resolve()
         if not (ckpt / "best_model.pt").exists():
             return
@@ -60,7 +113,8 @@ class IntentClassifier:
             model.eval()
             self._model     = model
             self._tokenizer = Tokenizer.load(ckpt / "tokenizer.json")
-            print("[intent] Loaded custom TherapistTransformer.")
+            self._is_v2     = False
+            print("[intent] Loaded custom TherapistTransformer V1 (GloVe).")
         except Exception as e:
             print(f"[intent] Could not load custom model: {e}. Using heuristics.")
 
@@ -117,11 +171,25 @@ class IntentClassifier:
             scores["crisis"] = 0.99
             return IntentResult(label="crisis", score=0.99, all_scores=scores)
 
-        ids  = self._tokenizer.encode(text)
-        mask = self._tokenizer.attention_mask(ids)
-        t_ids  = torch.tensor([ids],  dtype=torch.long)
-        t_mask = torch.tensor([mask], dtype=torch.long)
-        label, score = self._model.predict_intent(t_ids, t_mask)
+        if self._is_v2:
+            enc = self._bert_tok(
+                text, max_length=128, padding="max_length",
+                truncation=True, return_tensors="pt",
+            )
+            with torch.no_grad():
+                out = self._bert_model(
+                    input_ids=enc["input_ids"].to(self.device),
+                    attention_mask=enc["attention_mask"].to(self.device),
+                )
+            label, score = self._model.predict_intent(
+                out.last_hidden_state, enc["attention_mask"].to(self.device)
+            )
+        else:
+            ids  = self._tokenizer.encode(text)
+            mask = self._tokenizer.attention_mask(ids)
+            t_ids  = torch.tensor([ids],  dtype=torch.long)
+            t_mask = torch.tensor([mask], dtype=torch.long)
+            label, score = self._model.predict_intent(t_ids, t_mask)
 
         # Strong pattern override: if 2+ strong hits for a class the model missed, trust them
         for override_label, pattern in self._STRONG_PATTERNS.items():
