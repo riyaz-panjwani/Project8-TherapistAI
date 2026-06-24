@@ -213,10 +213,10 @@ def main():
     parser.add_argument("--output_dir",   default=str(CHECKPOINT_DIR))
     parser.add_argument("--cache_dir",    default=str(CACHE_DIR))
     parser.add_argument("--bert_model",   default=BERT_MODEL_ID)
-    parser.add_argument("--epochs",       type=int,   default=80)
+    parser.add_argument("--epochs",       type=int,   default=100)
     parser.add_argument("--batch_size",   type=int,   default=32)
-    parser.add_argument("--lr",           type=float, default=3e-4)
-    parser.add_argument("--patience",     type=int,   default=12)
+    parser.add_argument("--lr",           type=float, default=1e-4)
+    parser.add_argument("--patience",     type=int,   default=18)
     parser.add_argument("--warmup_frac",  type=float, default=0.08)
     parser.add_argument("--label_smooth", type=float, default=0.1)
     parser.add_argument("--d_model",      type=int,   default=256)
@@ -285,11 +285,11 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    best_val_loss  = float("inf")
+    best_val_acc   = 0.0
     patience_count = 0
 
-    print(f"\n{'Epoch':>5}  {'Train Loss':>10}  {'Val Loss':>9}  {'Intent Acc':>10}")
-    print("─" * 44)
+    print(f"\n{'Epoch':>5}  {'Train Loss':>10}  {'Val Loss':>9}  {'Intent Acc':>10}  {'Best Acc':>9}")
+    print("─" * 56)
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -315,10 +315,9 @@ def main():
         val_loss, val_acc = evaluate(model, val_dl, intent_crit, dst_crit, device)
         train_loss /= len(train_dl)
 
-        print(f"{epoch:>5}  {train_loss:>10.4f}  {val_loss:>9.4f}  {val_acc:>9.1%}")
-
-        if val_loss < best_val_loss:
-            best_val_loss  = val_loss
+        saved = ""
+        if val_acc > best_val_acc:
+            best_val_acc   = val_acc
             patience_count = 0
             torch.save(model.state_dict(), out_dir / "best_model.pt")
             config = {
@@ -329,15 +328,18 @@ def main():
                 "n_intent": len(INTENT_LABELS), "n_dst": len(DST_LABELS),
             }
             (out_dir / "config.json").write_text(json.dumps(config, indent=2))
-            print(f"       ✓ saved (val_loss={val_loss:.4f})")
+            saved = " ✓"
         else:
             patience_count += 1
-            if patience_count >= args.patience:
-                print(f"\nEarly stopping at epoch {epoch}.")
-                break
 
-    print(f"\nBest val loss : {best_val_loss:.4f}")
-    print(f"Checkpoint    : {out_dir}/best_model.pt")
+        print(f"{epoch:>5}  {train_loss:>10.4f}  {val_loss:>9.4f}  {val_acc:>9.1%}  {best_val_acc:>8.1%}{saved}")
+
+        if patience_count >= args.patience:
+            print(f"\nEarly stopping at epoch {epoch}.")
+            break
+
+    print(f"\nBest val accuracy : {best_val_acc:.1%}")
+    print(f"Checkpoint        : {out_dir}/best_model.pt")
 
 
 if __name__ == "__main__":
